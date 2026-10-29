@@ -1,7 +1,6 @@
 package net.craftcitizen.imagemaps;
 
 import com.google.common.io.Files;
-import net.craftcitizen.imagemaps.core.SemanticVersion;
 import net.craftcitizen.imagemaps.core.Utils;
 import net.craftcitizen.imagemaps.core.MessageLevel;
 import net.craftcitizen.imagemaps.core.MessageUtil;
@@ -136,29 +135,19 @@ public class ImageMaps extends JavaPlugin implements Listener {
     }
 
     public boolean isInvisibilitySupported() {
-        SemanticVersion version = Utils.getMCVersion();
-        return version.getMajor() >= 1 && version.getMinor() >= 16;
+        return Utils.getMCVersion().isAtLeast(1, 16, 0);
     }
 
     public boolean isGlowingSupported() {
-        SemanticVersion version = Utils.getMCVersion();
-        return version.getMajor() >= 1 && version.getMinor() >= 17;
+        return Utils.getMCVersion().isAtLeast(1, 17, 0);
     }
 
     public boolean isUpDownFaceSupported() {
-        SemanticVersion version = Utils.getMCVersion();
-
-        if (version.getMajor() < 1)
-            return false;
-        if (version.getMajor() == 1 && version.getMinor() == 14 && version.getRevision() >= 4)
-            return true;
-        return version.getMinor() > 14;
+        return Utils.getMCVersion().isAtLeast(1, 14, 4);
     }
 
     public boolean isSetTrackingSupported() {
-        SemanticVersion version = Utils.getMCVersion();
-
-        return version.getMajor() >= 1 && version.getMinor() >= 14;
+        return Utils.getMCVersion().isAtLeast(1, 14, 0);
     }
 
     private void saveMaps() {
