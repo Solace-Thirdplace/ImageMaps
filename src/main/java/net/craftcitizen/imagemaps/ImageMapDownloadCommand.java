@@ -1,8 +1,7 @@
 package net.craftcitizen.imagemaps;
 
-import de.craftlancer.core.LambdaRunnable;
-import de.craftlancer.core.util.MessageLevel;
-import de.craftlancer.core.util.MessageUtil;
+import net.craftcitizen.imagemaps.core.MessageLevel;
+import net.craftcitizen.imagemaps.core.MessageUtil;
 import org.bukkit.command.Command;
 import org.bukkit.command.CommandSender;
 
@@ -43,7 +42,7 @@ public class ImageMapDownloadCommand extends ImageMapSubCommand {
             return null;
         }
 
-        new LambdaRunnable(() -> download(sender, url, filename)).runTaskAsynchronously(plugin);
+        plugin.getServer().getAsyncScheduler().runNow(plugin, task -> download(sender, url, filename));
         return null;
     }
 

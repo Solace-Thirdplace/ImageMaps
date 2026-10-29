@@ -1,12 +1,10 @@
 package net.craftcitizen.imagemaps;
 
 import com.google.common.io.Files;
-import de.craftlancer.core.LambdaRunnable;
-import de.craftlancer.core.SemanticVersion;
-import de.craftlancer.core.Utils;
-import de.craftlancer.core.util.MessageLevel;
-import de.craftlancer.core.util.MessageUtil;
-import de.craftlancer.core.util.Tuple;
+import net.craftcitizen.imagemaps.core.Utils;
+import net.craftcitizen.imagemaps.core.MessageLevel;
+import net.craftcitizen.imagemaps.core.MessageUtil;
+import net.craftcitizen.imagemaps.core.Tuple;
 import net.md_5.bungee.api.ChatColor;
 import net.md_5.bungee.api.chat.BaseComponent;
 import net.md_5.bungee.api.chat.ComponentBuilder;
@@ -31,7 +29,6 @@ import org.bukkit.inventory.ItemStack;
 import org.bukkit.inventory.meta.MapMeta;
 import org.bukkit.map.MapView;
 import org.bukkit.plugin.java.JavaPlugin;
-import org.bukkit.scheduler.BukkitRunnable;
 
 import javax.imageio.ImageIO;
 import java.awt.image.BufferedImage;
@@ -41,6 +38,7 @@ import java.util.HashMap;
 import java.util.Iterator;
 import java.util.Map;
 import java.util.Map.Entry;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.logging.Level;
 import java.util.stream.Collectors;
 
@@ -58,8 +56,14 @@ public class ImageMaps extends JavaPlugin implements Listener {
     public static final int MAP_HEIGHT = 128;
     private static final String IMAGES_DIR = "images";
 
-    private Map<String, BufferedImage> imageCache = new HashMap<>();
-    private Map<ImageMap, Integer> maps = new HashMap<>();
+    // Shared between region threads (placement, player commands), the global region thread (console commands,
+    // autosave) and async threads (download, save), so both maps must be concurrent.
+    private final Map<String, BufferedImage> imageCache = new ConcurrentHashMap<>();
+    private final Map<ImageMap, Integer> maps = new ConcurrentHashMap<>();
+    // serialises "look up or create the map for this image tile", so two regions never create duplicates
+    private final Object mapCreationLock = new Object();
+    // serialises writes of maps.yml (autosave, delete and shutdown can overlap)
+    private final Object saveLock = new Object();
 
     private Material toggleItem;
 
@@ -91,7 +95,7 @@ public class ImageMaps extends JavaPlugin implements Listener {
 
         loadMaps();
 
-        new LambdaRunnable(this::saveMaps).runTaskTimer(this, AUTOSAVE_PERIOD, AUTOSAVE_PERIOD);
+        getServer().getGlobalRegionScheduler().runAtFixedRate(this, task -> saveMaps(), AUTOSAVE_PERIOD, AUTOSAVE_PERIOD);
     }
 
     @Override
@@ -131,29 +135,19 @@ public class ImageMaps extends JavaPlugin implements Listener {
     }
 
     public boolean isInvisibilitySupported() {
-        SemanticVersion version = Utils.getMCVersion();
-        return version.getMajor() >= 1 && version.getMinor() >= 16;
+        return Utils.getMCVersion().isAtLeast(1, 16, 0);
     }
 
     public boolean isGlowingSupported() {
-        SemanticVersion version = Utils.getMCVersion();
-        return version.getMajor() >= 1 && version.getMinor() >= 17;
+        return Utils.getMCVersion().isAtLeast(1, 17, 0);
     }
 
     public boolean isUpDownFaceSupported() {
-        SemanticVersion version = Utils.getMCVersion();
-
-        if (version.getMajor() < 1)
-            return false;
-        if (version.getMajor() == 1 && version.getMinor() == 14 && version.getRevision() >= 4)
-            return true;
-        return version.getMinor() > 14;
+        return Utils.getMCVersion().isAtLeast(1, 14, 4);
     }
 
     public boolean isSetTrackingSupported() {
-        SemanticVersion version = Utils.getMCVersion();
-
-        return version.getMajor() >= 1 && version.getMinor() >= 14;
+        return Utils.getMCVersion().isAtLeast(1, 14, 0);
     }
 
     private void saveMaps() {
@@ -161,17 +155,19 @@ public class ImageMaps extends JavaPlugin implements Listener {
         config.set(CONFIG_VERSION_KEY, CONFIG_VERSION);
         config.set("maps", maps.entrySet().stream().collect(Collectors.toMap(Entry::getValue, Entry::getKey)));
 
-        BukkitRunnable saveTask = new LambdaRunnable(() -> {
-            try {
-                config.save(new File(getDataFolder(), MAPS_YML));
+        Runnable saveTask = () -> {
+            synchronized (saveLock) {
+                try {
+                    config.save(new File(getDataFolder(), MAPS_YML));
+                }
+                catch (IOException e) {
+                    e.printStackTrace();
+                }
             }
-            catch (IOException e) {
-                e.printStackTrace();
-            }
-        });
+        };
 
         if (isEnabled())
-            saveTask.runTaskAsynchronously(this);
+            getServer().getAsyncScheduler().runNow(this, task -> saveTask.run());
         else
             saveTask.run();
     }
@@ -284,7 +280,8 @@ public class ImageMaps extends JavaPlugin implements Listener {
 
         try {
             image = ImageIO.read(file);
-            imageCache.put(filename.toLowerCase(), image);
+            if (image != null) // ConcurrentHashMap rejects null values
+                imageCache.put(filename.toLowerCase(), image);
         }
         catch (IOException e) {
             getLogger().log(Level.SEVERE, String.format("Error while trying to read image %s.", file.getName()), e);
@@ -339,6 +336,10 @@ public class ImageMaps extends JavaPlugin implements Listener {
                 MessageUtil.sendMessage(this, player, MessageLevel.NORMAL,
                                         "Map couldn't be placed, there is another entity in the way.");
                 break;
+            case AREA_NOT_OWNED:
+                MessageUtil.sendMessage(this, player, MessageLevel.NORMAL,
+                                        "Map couldn't be placed, the image reaches too far from you.");
+                break;
             case SUCCESS:
                 break;
         }
@@ -364,6 +365,17 @@ public class ImageMaps extends JavaPlugin implements Listener {
 
         if (widthDirection == null || heightDirection == null)
             return PlacementResult.INVALID_DIRECTION;
+
+        // On Folia this runs on the clicking player's region thread, which may only touch blocks and entities in
+        // chunks it owns. A very large image can reach past that region; refuse it rather than read or spawn
+        // across threads. On Paper/Purpur the main thread owns everything, so this never fails there.
+        for (int x = 0; x < size.getKey(); x++)
+            for (int y = 0; y < size.getValue(); y++)
+                if (!getServer().isOwnedByCurrentRegion(block.getRelative(widthDirection, x)
+                                                             .getRelative(heightDirection, y))
+                    || !getServer().isOwnedByCurrentRegion(b.getRelative(widthDirection, x)
+                                                            .getRelative(heightDirection, y)))
+                    return PlacementResult.AREA_NOT_OWNED;
 
         // check for space
         for (int x = 0; x < size.getKey(); x++)
@@ -463,23 +475,26 @@ public class ImageMaps extends JavaPlugin implements Listener {
         ItemStack item = new ItemStack(Material.FILLED_MAP);
 
         ImageMap imageMap = new ImageMap(data.getFilename(), x, y, getScale(image, data.getSize()));
-        if (maps.containsKey(imageMap)) {
-            MapMeta meta = (MapMeta) item.getItemMeta();
-            meta.setMapId(maps.get(imageMap));
+        synchronized (mapCreationLock) {
+            Integer existingId = maps.get(imageMap);
+            if (existingId != null) {
+                MapMeta meta = (MapMeta) item.getItemMeta();
+                meta.setMapId(existingId);
+                item.setItemMeta(meta);
+                return item;
+            }
+
+            MapView map = getServer().createMap(getServer().getWorlds().get(0));
+            map.getRenderers().forEach(map::removeRenderer);
+            map.addRenderer(new ImageMapRenderer(this, image, x, y, getScale(image, data.getSize())));
+            if (isSetTrackingSupported())
+                map.setTrackingPosition(false);
+
+            MapMeta meta = ((MapMeta) item.getItemMeta());
+            meta.setMapView(map);
             item.setItemMeta(meta);
-            return item;
+            maps.put(imageMap, map.getId());
         }
-
-        MapView map = getServer().createMap(getServer().getWorlds().get(0));
-        map.getRenderers().forEach(map::removeRenderer);
-        map.addRenderer(new ImageMapRenderer(this, image, x, y, getScale(image, data.getSize())));
-        if (isSetTrackingSupported())
-            map.setTrackingPosition(false);
-
-        MapMeta meta = ((MapMeta) item.getItemMeta());
-        meta.setMapView(map);
-        item.setItemMeta(meta);
-        maps.put(imageMap, map.getId());
 
         return item;
     }

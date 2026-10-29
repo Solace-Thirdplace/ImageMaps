@@ -1,6 +1,5 @@
 package net.craftcitizen.imagemaps;
 
-import de.craftlancer.core.LambdaRunnable;
 import org.bukkit.entity.Player;
 import org.bukkit.map.MapCanvas;
 import org.bukkit.map.MapPalette;
@@ -14,8 +13,9 @@ import java.awt.image.BufferedImage;
 public class ImageMapRenderer extends MapRenderer {
     private ImageMaps plugin;
 
-    private BufferedImage image = null;
-    private boolean first = true;
+    // written by commands (any thread), read by the region thread rendering the map
+    private volatile BufferedImage image = null;
+    private volatile boolean first = true;
 
     private final int x;
     private final int y;
@@ -43,26 +43,33 @@ public class ImageMapRenderer extends MapRenderer {
         if (x2 - x1 <= 0 || y2 - y1 <= 0)
             return;
 
-        this.image = input.getSubimage(x1, y1, x2 - x1, y2 - y1);
+        BufferedImage part = input.getSubimage(x1, y1, x2 - x1, y2 - y1);
 
         if (scale != 1D) {
             BufferedImage resized = new BufferedImage(ImageMaps.MAP_WIDTH, ImageMaps.MAP_HEIGHT,
-                                                      input.getType() == 0 ? image.getType() : input.getType());
+                                                      input.getType() == 0 ? part.getType() : input.getType());
             AffineTransform at = new AffineTransform();
             at.scale(scale, scale);
             AffineTransformOp scaleOp = new AffineTransformOp(at, AffineTransformOp.TYPE_BILINEAR);
-            this.image = scaleOp.filter(this.image, resized);
+            part = scaleOp.filter(part, resized);
         }
 
+        // publish only the finished image, so a render on another thread never sees the unscaled cut-out
+        this.image = part;
         first = true;
     }
 
     @Override
     public void render(MapView view, MapCanvas canvas, Player player) {
         if (image != null && first) {
-            new LambdaRunnable(() -> canvas.drawImage(0, 0, image)).runTaskLater(plugin, System.nanoTime() % 60);
             // spread out pseudo randomly in a very naive way
+            long delay = Math.max(1L, System.nanoTime() % 60);
             first = false;
+            // render() runs on the thread owning the viewer's region; draw there too. If the viewer leaves
+            // before the task runs, let the next render schedule the draw again.
+            if (player.getScheduler().runDelayed(plugin, task -> canvas.drawImage(0, 0, image), () -> first = true,
+                                                 delay) == null)
+                first = true;
         }
     }
 
