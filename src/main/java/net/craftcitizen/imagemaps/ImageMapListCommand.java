@@ -1,8 +1,8 @@
 package net.craftcitizen.imagemaps;
 
-import de.craftlancer.core.Utils;
-import de.craftlancer.core.util.MessageLevel;
-import de.craftlancer.core.util.MessageUtil;
+import net.craftcitizen.imagemaps.core.Utils;
+import net.craftcitizen.imagemaps.core.MessageLevel;
+import net.craftcitizen.imagemaps.core.MessageUtil;
 import net.md_5.bungee.api.ChatColor;
 import net.md_5.bungee.api.chat.BaseComponent;
 import net.md_5.bungee.api.chat.ClickEvent;

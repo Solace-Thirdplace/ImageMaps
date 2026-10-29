@@ -5,8 +5,8 @@ import javax.imageio.ImageIO;
 import org.bukkit.command.Command;
 import org.bukkit.command.CommandSender;
 
-import de.craftlancer.core.util.MessageLevel;
-import de.craftlancer.core.util.MessageUtil;
+import net.craftcitizen.imagemaps.core.MessageLevel;
+import net.craftcitizen.imagemaps.core.MessageUtil;
 
 public class ImageMapDebugInfoCommand extends ImageMapSubCommand {
 

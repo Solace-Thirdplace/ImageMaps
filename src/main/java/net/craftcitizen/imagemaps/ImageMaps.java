@@ -1,12 +1,11 @@
 package net.craftcitizen.imagemaps;
 
 import com.google.common.io.Files;
-import de.craftlancer.core.LambdaRunnable;
-import de.craftlancer.core.SemanticVersion;
-import de.craftlancer.core.Utils;
-import de.craftlancer.core.util.MessageLevel;
-import de.craftlancer.core.util.MessageUtil;
-import de.craftlancer.core.util.Tuple;
+import net.craftcitizen.imagemaps.core.SemanticVersion;
+import net.craftcitizen.imagemaps.core.Utils;
+import net.craftcitizen.imagemaps.core.MessageLevel;
+import net.craftcitizen.imagemaps.core.MessageUtil;
+import net.craftcitizen.imagemaps.core.Tuple;
 import net.md_5.bungee.api.ChatColor;
 import net.md_5.bungee.api.chat.BaseComponent;
 import net.md_5.bungee.api.chat.ComponentBuilder;
@@ -31,7 +30,6 @@ import org.bukkit.inventory.ItemStack;
 import org.bukkit.inventory.meta.MapMeta;
 import org.bukkit.map.MapView;
 import org.bukkit.plugin.java.JavaPlugin;
-import org.bukkit.scheduler.BukkitRunnable;
 
 import javax.imageio.ImageIO;
 import java.awt.image.BufferedImage;
@@ -91,7 +89,7 @@ public class ImageMaps extends JavaPlugin implements Listener {
 
         loadMaps();
 
-        new LambdaRunnable(this::saveMaps).runTaskTimer(this, AUTOSAVE_PERIOD, AUTOSAVE_PERIOD);
+        getServer().getScheduler().runTaskTimer(this, this::saveMaps, AUTOSAVE_PERIOD, AUTOSAVE_PERIOD);
     }
 
     @Override
@@ -161,17 +159,17 @@ public class ImageMaps extends JavaPlugin implements Listener {
         config.set(CONFIG_VERSION_KEY, CONFIG_VERSION);
         config.set("maps", maps.entrySet().stream().collect(Collectors.toMap(Entry::getValue, Entry::getKey)));
 
-        BukkitRunnable saveTask = new LambdaRunnable(() -> {
+        Runnable saveTask = () -> {
             try {
                 config.save(new File(getDataFolder(), MAPS_YML));
             }
             catch (IOException e) {
                 e.printStackTrace();
             }
-        });
+        };
 
         if (isEnabled())
-            saveTask.runTaskAsynchronously(this);
+            getServer().getScheduler().runTaskAsynchronously(this, saveTask);
         else
             saveTask.run();
     }

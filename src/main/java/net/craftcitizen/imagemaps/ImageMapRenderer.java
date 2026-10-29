@@ -1,6 +1,5 @@
 package net.craftcitizen.imagemaps;
 
-import de.craftlancer.core.LambdaRunnable;
 import org.bukkit.entity.Player;
 import org.bukkit.map.MapCanvas;
 import org.bukkit.map.MapPalette;
@@ -60,7 +59,7 @@ public class ImageMapRenderer extends MapRenderer {
     @Override
     public void render(MapView view, MapCanvas canvas, Player player) {
         if (image != null && first) {
-            new LambdaRunnable(() -> canvas.drawImage(0, 0, image)).runTaskLater(plugin, System.nanoTime() % 60);
+            plugin.getServer().getScheduler().runTaskLater(plugin, () -> canvas.drawImage(0, 0, image), System.nanoTime() % 60);
             // spread out pseudo randomly in a very naive way
             first = false;
         }
