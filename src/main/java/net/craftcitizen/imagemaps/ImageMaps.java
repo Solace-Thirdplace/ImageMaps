@@ -39,6 +39,7 @@ import java.util.HashMap;
 import java.util.Iterator;
 import java.util.Map;
 import java.util.Map.Entry;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.logging.Level;
 import java.util.stream.Collectors;
 
@@ -56,8 +57,14 @@ public class ImageMaps extends JavaPlugin implements Listener {
     public static final int MAP_HEIGHT = 128;
     private static final String IMAGES_DIR = "images";
 
-    private Map<String, BufferedImage> imageCache = new HashMap<>();
-    private Map<ImageMap, Integer> maps = new HashMap<>();
+    // Shared between region threads (placement, player commands), the global region thread (console commands,
+    // autosave) and async threads (download, save), so both maps must be concurrent.
+    private final Map<String, BufferedImage> imageCache = new ConcurrentHashMap<>();
+    private final Map<ImageMap, Integer> maps = new ConcurrentHashMap<>();
+    // serialises "look up or create the map for this image tile", so two regions never create duplicates
+    private final Object mapCreationLock = new Object();
+    // serialises writes of maps.yml (autosave, delete and shutdown can overlap)
+    private final Object saveLock = new Object();
 
     private Material toggleItem;
 
@@ -89,7 +96,7 @@ public class ImageMaps extends JavaPlugin implements Listener {
 
         loadMaps();
 
-        getServer().getScheduler().runTaskTimer(this, this::saveMaps, AUTOSAVE_PERIOD, AUTOSAVE_PERIOD);
+        getServer().getGlobalRegionScheduler().runAtFixedRate(this, task -> saveMaps(), AUTOSAVE_PERIOD, AUTOSAVE_PERIOD);
     }
 
     @Override
@@ -160,16 +167,18 @@ public class ImageMaps extends JavaPlugin implements Listener {
         config.set("maps", maps.entrySet().stream().collect(Collectors.toMap(Entry::getValue, Entry::getKey)));
 
         Runnable saveTask = () -> {
-            try {
-                config.save(new File(getDataFolder(), MAPS_YML));
-            }
-            catch (IOException e) {
-                e.printStackTrace();
+            synchronized (saveLock) {
+                try {
+                    config.save(new File(getDataFolder(), MAPS_YML));
+                }
+                catch (IOException e) {
+                    e.printStackTrace();
+                }
             }
         };
 
         if (isEnabled())
-            getServer().getScheduler().runTaskAsynchronously(this, saveTask);
+            getServer().getAsyncScheduler().runNow(this, task -> saveTask.run());
         else
             saveTask.run();
     }
@@ -282,7 +291,8 @@ public class ImageMaps extends JavaPlugin implements Listener {
 
         try {
             image = ImageIO.read(file);
-            imageCache.put(filename.toLowerCase(), image);
+            if (image != null) // ConcurrentHashMap rejects null values
+                imageCache.put(filename.toLowerCase(), image);
         }
         catch (IOException e) {
             getLogger().log(Level.SEVERE, String.format("Error while trying to read image %s.", file.getName()), e);
@@ -337,6 +347,10 @@ public class ImageMaps extends JavaPlugin implements Listener {
                 MessageUtil.sendMessage(this, player, MessageLevel.NORMAL,
                                         "Map couldn't be placed, there is another entity in the way.");
                 break;
+            case AREA_NOT_OWNED:
+                MessageUtil.sendMessage(this, player, MessageLevel.NORMAL,
+                                        "Map couldn't be placed, the image reaches too far from you.");
+                break;
             case SUCCESS:
                 break;
         }
@@ -362,6 +376,17 @@ public class ImageMaps extends JavaPlugin implements Listener {
 
         if (widthDirection == null || heightDirection == null)
             return PlacementResult.INVALID_DIRECTION;
+
+        // On Folia this runs on the clicking player's region thread, which may only touch blocks and entities in
+        // chunks it owns. A very large image can reach past that region; refuse it rather than read or spawn
+        // across threads. On Paper/Purpur the main thread owns everything, so this never fails there.
+        for (int x = 0; x < size.getKey(); x++)
+            for (int y = 0; y < size.getValue(); y++)
+                if (!getServer().isOwnedByCurrentRegion(block.getRelative(widthDirection, x)
+                                                             .getRelative(heightDirection, y))
+                    || !getServer().isOwnedByCurrentRegion(b.getRelative(widthDirection, x)
+                                                            .getRelative(heightDirection, y)))
+                    return PlacementResult.AREA_NOT_OWNED;
 
         // check for space
         for (int x = 0; x < size.getKey(); x++)
@@ -461,23 +486,26 @@ public class ImageMaps extends JavaPlugin implements Listener {
         ItemStack item = new ItemStack(Material.FILLED_MAP);
 
         ImageMap imageMap = new ImageMap(data.getFilename(), x, y, getScale(image, data.getSize()));
-        if (maps.containsKey(imageMap)) {
-            MapMeta meta = (MapMeta) item.getItemMeta();
-            meta.setMapId(maps.get(imageMap));
+        synchronized (mapCreationLock) {
+            Integer existingId = maps.get(imageMap);
+            if (existingId != null) {
+                MapMeta meta = (MapMeta) item.getItemMeta();
+                meta.setMapId(existingId);
+                item.setItemMeta(meta);
+                return item;
+            }
+
+            MapView map = getServer().createMap(getServer().getWorlds().get(0));
+            map.getRenderers().forEach(map::removeRenderer);
+            map.addRenderer(new ImageMapRenderer(this, image, x, y, getScale(image, data.getSize())));
+            if (isSetTrackingSupported())
+                map.setTrackingPosition(false);
+
+            MapMeta meta = ((MapMeta) item.getItemMeta());
+            meta.setMapView(map);
             item.setItemMeta(meta);
-            return item;
+            maps.put(imageMap, map.getId());
         }
-
-        MapView map = getServer().createMap(getServer().getWorlds().get(0));
-        map.getRenderers().forEach(map::removeRenderer);
-        map.addRenderer(new ImageMapRenderer(this, image, x, y, getScale(image, data.getSize())));
-        if (isSetTrackingSupported())
-            map.setTrackingPosition(false);
-
-        MapMeta meta = ((MapMeta) item.getItemMeta());
-        meta.setMapView(map);
-        item.setItemMeta(meta);
-        maps.put(imageMap, map.getId());
 
         return item;
     }

@@ -42,7 +42,7 @@ public class ImageMapDownloadCommand extends ImageMapSubCommand {
             return null;
         }
 
-        plugin.getServer().getScheduler().runTaskAsynchronously(plugin, () -> download(sender, url, filename));
+        plugin.getServer().getAsyncScheduler().runNow(plugin, task -> download(sender, url, filename));
         return null;
     }
 
